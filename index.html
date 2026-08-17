@@ -1,0 +1,1753 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8" />
+<title>Rodinný rodokmen</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="manifest" id="pwa-manifest" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+  #boot-msg { font-family: Georgia, serif; padding: 40px; color: #6B6250; }
+</style>
+</head>
+<body>
+<div id="root"><div id="boot-msg">Načítám aplikaci…</div></div>
+
+<script>
+  // ====== DOPLŇTE SVOJE ÚDAJE ZE SUPABASE (Project Settings → API) ======
+  const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+  const SUPABASE_ANON_KEY = "YOUR-ANON-PUBLIC-KEY";
+  // ========================================================================
+
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  // Mapa geokódovaných míst se ukládá jen v tomto prohlížeči (není citlivá,
+  // nemá smysl ji tahat přes databázi) — mapová komponenta nadále volá
+  // window.storage, tak jí to necháme fungovat přes localStorage.
+  window.storage = {
+    async get(key, shared) {
+      const raw = localStorage.getItem('rodokmen:' + key);
+      if (raw === null) throw new Error('key not found');
+      return { key, value: raw, shared: !!shared };
+    },
+    async set(key, value, shared) {
+      localStorage.setItem('rodokmen:' + key, value);
+      return { key, value, shared: !!shared };
+    },
+    async delete(key, shared) {
+      localStorage.removeItem('rodokmen:' + key);
+      return { key, deleted: true, shared: !!shared };
+    },
+    async list(prefix, shared) {
+      const p = 'rodokmen:' + (prefix || '');
+      const keys = Object.keys(localStorage)
+        .filter((k) => k.startsWith(p))
+        .map((k) => k.slice('rodokmen:'.length));
+      return { keys, prefix, shared: !!shared };
+    },
+  };
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ---- row <-> app-object mapping for Supabase tables ----
+function personToRow(p) {
+  return {
+    id: p.id,
+    jmeno: p.jmeno || "",
+    prijmeni: p.prijmeni || "",
+    datum_narozeni: p.datumNarozeni || "",
+    misto_narozeni: p.mistoNarozeni || "",
+    datum_snatku: p.datumSnatku || "",
+    misto_snatku: p.mistoSnatku || "",
+    datum_umrti: p.datumUmrti || "",
+    misto_umrti: p.mistoUmrti || "",
+    zpusob_umrti: p.zpusobUmrti || "",
+    profese: p.profese || "",
+    poznamka: p.poznamka || "",
+  };
+}
+function rowToPerson(r) {
+  return {
+    id: r.id,
+    jmeno: r.jmeno || "",
+    prijmeni: r.prijmeni || "",
+    datumNarozeni: r.datum_narozeni || "",
+    mistoNarozeni: r.misto_narozeni || "",
+    datumSnatku: r.datum_snatku || "",
+    mistoSnatku: r.misto_snatku || "",
+    datumUmrti: r.datum_umrti || "",
+    mistoUmrti: r.misto_umrti || "",
+    zpusobUmrti: r.zpusob_umrti || "",
+    profese: r.profese || "",
+    poznamka: r.poznamka || "",
+  };
+}
+function relToRow(r) {
+  return { id: r.id, person_id: r.personId, target_id: r.targetId, type: r.type };
+}
+function rowToRel(r) {
+  return { id: r.id, personId: r.person_id, targetId: r.target_id, type: r.type };
+}
+
+// ---- auth ----
+function Root() {
+  const [session, setSession] = useState(undefined); // undefined = loading, null = signed out
+
+  useEffect(() => {
+    sb.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = sb.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return (
+      <div style={{ padding: 40, fontFamily: "Georgia, serif", color: "#6B6250" }}>
+        Načítám…
+      </div>
+    );
+  }
+  if (!session) {
+    return <AuthGate />;
+  }
+  return <App userEmail={session.user.email} onLogout={() => sb.auth.signOut()} />;
+}
+
+function AuthGate() {
+  const [mode, setMode] = useState("signin"); // signin | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    setInfo("");
+    setBusy(true);
+    try {
+      if (mode === "signin") {
+        const { error } = await sb.auth.signInWithPassword({ email, password });
+        if (error) setError(error.message);
+      } else {
+        const { error } = await sb.auth.signUp({ email, password });
+        if (error) setError(error.message);
+        else setInfo("Účet vytvořen. Pokud máte v Supabase zapnuté potvrzení e-mailu, zkontrolujte schránku.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#F3ECD9",
+        fontFamily: "Georgia, 'Times New Roman', serif",
+        color: "#2E2A24",
+      }}
+    >
+      <form
+        onSubmit={submit}
+        style={{ background: "#FBF7EC", border: "1px solid #C7B896", padding: 28, width: 320, borderRadius: 3 }}
+      >
+        <h1 style={{ fontSize: 20, marginBottom: 4 }}>Rodinný rodokmen</h1>
+        <p style={{ fontSize: 12, color: "#6B6250", marginBottom: 18 }}>
+          {mode === "signin" ? "Přihlaste se ke svým datům." : "Vytvořte si účet."}
+        </p>
+        <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>E-mail</label>
+        <input
+          type="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={{ width: "100%", padding: 8, marginBottom: 12, border: "1px solid #C7B896", background: "#fff", boxSizing: "border-box" }}
+        />
+        <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Heslo</label>
+        <input
+          type="password"
+          required
+          minLength={6}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={{ width: "100%", padding: 8, marginBottom: 16, border: "1px solid #C7B896", background: "#fff", boxSizing: "border-box" }}
+        />
+        {error && <p style={{ color: "#8B3A3A", fontSize: 12, marginBottom: 12 }}>{error}</p>}
+        {info && <p style={{ color: "#5F6F52", fontSize: 12, marginBottom: 12 }}>{info}</p>}
+        <button
+          type="submit"
+          disabled={busy}
+          style={{
+            width: "100%",
+            padding: "10px 0",
+            background: "#8B3A3A",
+            color: "#F3ECD9",
+            border: "none",
+            borderRadius: 2,
+            fontFamily: "'Courier New', monospace",
+            cursor: "pointer",
+          }}
+        >
+          {mode === "signin" ? "Přihlásit" : "Zaregistrovat"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMode(mode === "signin" ? "signup" : "signin");
+            setError("");
+            setInfo("");
+          }}
+          style={{
+            width: "100%",
+            marginTop: 10,
+            padding: "8px 0",
+            background: "transparent",
+            border: "1px solid #C7B896",
+            borderRadius: 2,
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          {mode === "signin" ? "Nemáte účet? Zaregistrujte se" : "Už máte účet? Přihlaste se"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+
+const REL_TYPES = [
+  { value: "rodic", label: "rodič", reciprocal: "dite" },
+  { value: "dite", label: "dítě", reciprocal: "rodic" },
+  { value: "partner", label: "manžel/manželka", reciprocal: "partner" },
+  { value: "sourozenec", label: "sourozenec", reciprocal: "sourozenec" },
+];
+
+const relLabel = (v) => REL_TYPES.find((r) => r.value === v)?.label || v;
+
+function makeRelationshipPair(personId, targetId, type) {
+  const recip = REL_TYPES.find((r) => r.value === type).reciprocal;
+  return [
+    { id: crypto.randomUUID(), personId, targetId, type },
+    { id: crypto.randomUUID(), personId: targetId, targetId: personId, type: recip },
+  ];
+}
+
+function pairKey(a, b) {
+  return [a, b].sort().join("|");
+}
+
+function parseYear(dateStr) {
+  const m = (dateStr || "").match(/\d{4}/);
+  return m ? parseInt(m[0], 10) : null;
+}
+
+function normalizePlace(s) {
+  if (!s) return "";
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function placesMatch(a, b) {
+  const na = normalizePlace(a);
+  const nb = normalizePlace(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+// Odhadne možné příbuzenské vztahy mezi dosud nepropojenými osobami na
+// základě roku narození (rodič mohl mít dítě nejdříve v 18 letech, nejpozději
+// v 60) a shody míst narození / sňatku.
+function generateSuggestions(people, relationships) {
+  const related = new Set();
+  relationships.forEach((r) => related.add(pairKey(r.personId, r.targetId)));
+
+  const results = [];
+  for (let i = 0; i < people.length; i++) {
+    for (let j = i + 1; j < people.length; j++) {
+      const A = people[i];
+      const B = people[j];
+      if (related.has(pairKey(A.id, B.id))) continue;
+
+      const cands = [];
+      const yA = parseYear(A.datumNarozeni);
+      const yB = parseYear(B.datumNarozeni);
+
+      if (A.mistoSnatku && B.mistoSnatku && placesMatch(A.mistoSnatku, B.mistoSnatku)) {
+        if (A.datumSnatku && B.datumSnatku && A.datumSnatku === B.datumSnatku) {
+          cands.push({ type: "partner", a: A, b: B, confidence: 3, reason: "shodné datum i místo sňatku" });
+        } else {
+          cands.push({ type: "partner", a: A, b: B, confidence: 2, reason: "shodné místo sňatku" });
+        }
+      }
+
+      if (yA != null && yB != null) {
+        const diff = yB - yA;
+        if (diff >= 18 && diff <= 60) {
+          const placeHit =
+            placesMatch(B.mistoNarozeni, A.mistoNarozeni) || placesMatch(B.mistoNarozeni, A.mistoSnatku);
+          cands.push({
+            type: "parent-child",
+            parent: A,
+            child: B,
+            confidence: placeHit ? 2 : 1,
+            reason: `rozdíl věku ${diff} let${placeHit ? ", shoda míst" : ""}`,
+          });
+        } else if (diff <= -18 && diff >= -60) {
+          const placeHit =
+            placesMatch(A.mistoNarozeni, B.mistoNarozeni) || placesMatch(A.mistoNarozeni, B.mistoSnatku);
+          cands.push({
+            type: "parent-child",
+            parent: B,
+            child: A,
+            confidence: placeHit ? 2 : 1,
+            reason: `rozdíl věku ${-diff} let${placeHit ? ", shoda míst" : ""}`,
+          });
+        } else if (Math.abs(diff) < 18 && A.mistoNarozeni && placesMatch(A.mistoNarozeni, B.mistoNarozeni)) {
+          cands.push({
+            type: "sourozenec",
+            a: A,
+            b: B,
+            confidence: 2,
+            reason: `podobný věk (rozdíl ${Math.abs(diff)} let) a stejné místo narození`,
+          });
+        }
+      }
+
+      if (cands.length === 0) continue;
+      cands.sort((x, y) => y.confidence - x.confidence);
+      results.push(cands[0]);
+    }
+  }
+  results.sort((a, b) => b.confidence - a.confidence);
+  return results;
+}
+
+const emptyPerson = () => ({
+  id: crypto.randomUUID(),
+  jmeno: "",
+  prijmeni: "",
+  datumNarozeni: "",
+  mistoNarozeni: "",
+  datumSnatku: "",
+  mistoSnatku: "",
+  datumUmrti: "",
+  mistoUmrti: "",
+  zpusobUmrti: "",
+  profese: "",
+  poznamka: "",
+});
+
+const FIELDS = [
+  ["jmeno", "Jméno"],
+  ["prijmeni", "Příjmení"],
+  ["datumNarozeni", "Datum narození"],
+  ["mistoNarozeni", "Místo narození"],
+  ["datumSnatku", "Datum sňatku"],
+  ["mistoSnatku", "Místo sňatku"],
+  ["datumUmrti", "Datum úmrtí"],
+  ["mistoUmrti", "Místo úmrtí"],
+  ["zpusobUmrti", "Způsob úmrtí"],
+  ["profese", "Profese"],
+];
+
+function initials(p) {
+  return `${(p.jmeno || "?")[0] || ""}${(p.prijmeni || "?")[0] || ""}`.toUpperCase();
+}
+
+function App({ userEmail, onLogout }) {
+  const [people, setPeople] = useState([]);
+  const [relationships, setRelationships] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
+  const [editing, setEditing] = useState(null); // person draft being edited/created
+  const [addingRel, setAddingRel] = useState(false);
+  const [relDraft, setRelDraft] = useState({ type: "rodic", targetId: "" });
+  const [view, setView] = useState("app"); // "app" | "print" | "map"
+  const importInputRef = useRef(null);
+
+  // load from Supabase
+  useEffect(() => {
+    (async () => {
+      try {
+        const [{ data: peopleRows, error: e1 }, { data: relRows, error: e2 }] = await Promise.all([
+          sb.from("people").select("*"),
+          sb.from("relationships").select("*"),
+        ]);
+        if (e1) console.error(e1);
+        if (e2) console.error(e2);
+        setPeople((peopleRows || []).map(rowToPerson));
+        setRelationships((relRows || []).map(rowToRel));
+      } catch (e) {
+        console.error(e);
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // save to Supabase on change (simple full replace, fine for personal-scale data)
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        await sb.from("relationships").delete().not("id", "is", null);
+        await sb.from("people").delete().not("id", "is", null);
+        if (people.length) {
+          const { error } = await sb.from("people").insert(people.map(personToRow));
+          if (error) throw error;
+        }
+        if (relationships.length) {
+          const { error } = await sb.from("relationships").insert(relationships.map(relToRow));
+          if (error) throw error;
+        }
+        setSaveError(false);
+      } catch (e) {
+        console.error(e);
+        setSaveError(true);
+      }
+    })();
+  }, [people, relationships, loaded]);
+
+  const selected = useMemo(
+    () => people.find((p) => p.id === selectedId) || null,
+    [people, selectedId]
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const sorted = [...people].sort((a, b) =>
+      `${a.prijmeni}${a.jmeno}`.localeCompare(`${b.prijmeni}${b.jmeno}`, "cs")
+    );
+    if (!q) return sorted;
+    return sorted.filter((p) =>
+      `${p.jmeno} ${p.prijmeni} ${p.profese} ${p.mistoNarozeni}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [people, query]);
+
+  function startNew() {
+    const draft = emptyPerson();
+    setEditing(draft);
+    setSelectedId(null);
+  }
+
+  function startEdit(p) {
+    setEditing({ ...p });
+  }
+
+  function saveEditing() {
+    if (!editing.jmeno && !editing.prijmeni) return;
+    setPeople((prev) => {
+      const exists = prev.some((p) => p.id === editing.id);
+      return exists
+        ? prev.map((p) => (p.id === editing.id ? editing : p))
+        : [...prev, editing];
+    });
+    setSelectedId(editing.id);
+    setEditing(null);
+  }
+
+  function deletePerson(id) {
+    setPeople((prev) => prev.filter((p) => p.id !== id));
+    setRelationships((prev) =>
+      prev.filter((r) => r.personId !== id && r.targetId !== id)
+    );
+    if (selectedId === id) setSelectedId(null);
+  }
+
+  function addRelationship() {
+    if (!relDraft.targetId || !selected) return;
+    const type = relDraft.type;
+    const already = relationships.some(
+      (r) =>
+        r.personId === selected.id &&
+        r.targetId === relDraft.targetId &&
+        r.type === type
+    );
+    if (already) {
+      setAddingRel(false);
+      return;
+    }
+    setRelationships((prev) => [
+      ...prev,
+      ...makeRelationshipPair(selected.id, relDraft.targetId, type),
+    ]);
+    setRelDraft({ type: "rodic", targetId: "" });
+    setAddingRel(false);
+  }
+
+  function removeRelationship(rel) {
+    setRelationships((prev) =>
+      prev.filter(
+        (r) =>
+          !(
+            (r.personId === rel.personId && r.targetId === rel.targetId && r.type === rel.type) ||
+            (r.personId === rel.targetId && r.targetId === rel.personId)
+          )
+      )
+    );
+  }
+
+  const selectedRels = useMemo(() => {
+    if (!selected) return [];
+    return relationships
+      .filter((r) => r.personId === selected.id)
+      .map((r) => ({ ...r, person: people.find((p) => p.id === r.targetId) }))
+      .filter((r) => r.person);
+  }, [relationships, selected, people]);
+
+  const personLabel = (p) =>
+    `${p.jmeno || "(bez jména)"} ${p.prijmeni || ""}`.trim();
+
+  function downloadFile(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function exportGedcom() {
+    downloadFile(
+      "rodokmen.ged",
+      buildGedcom(people, relationships),
+      "text/plain;charset=utf-8"
+    );
+  }
+
+  function exportBackup() {
+    const stamp = new Date().toISOString().slice(0, 10);
+    const payload = JSON.stringify(
+      { version: 1, exportedAt: new Date().toISOString(), people, relationships },
+      null,
+      2
+    );
+    downloadFile(`rodokmen-zaloha-${stamp}.json`, payload, "application/json;charset=utf-8");
+  }
+
+  function triggerImport() {
+    importInputRef.current?.click();
+  }
+
+  async function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data || !Array.isArray(data.people) || !Array.isArray(data.relationships)) {
+        alert("Tento soubor nevypadá jako platná záloha rodokmenu.");
+        return;
+      }
+      const proceed = window.confirm(
+        `Načíst zálohu? Nahradí aktuální data (${people.length} ${
+          people.length === 1 ? "osoba" : "osob"
+        }) daty ze zálohy (${data.people.length} ${
+          data.people.length === 1 ? "osoba" : "osob"
+        }). Tuto akci nelze vrátit zpět.`
+      );
+      if (!proceed) return;
+      setPeople(data.people);
+      setRelationships(data.relationships);
+      setSelectedId(null);
+      setEditing(null);
+    } catch (err) {
+      alert("Soubor se nepodařilo přečíst jako JSON zálohu.");
+    } finally {
+      e.target.value = "";
+    }
+  }
+
+  if (view === "print") {
+    return (
+      <PrintTree
+        people={people}
+        relationships={relationships}
+        onBack={() => setView("app")}
+      />
+    );
+  }
+
+  if (view === "map") {
+    return <MapView people={people} onBack={() => setView("app")} />;
+  }
+
+  if (view === "suggest") {
+    return (
+      <SuggestionsView
+        people={people}
+        relationships={relationships}
+        setRelationships={setRelationships}
+        onBack={() => setView("app")}
+      />
+    );
+  }
+
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{
+        background: "#F3ECD9",
+        color: "#2E2A24",
+        fontFamily: "Georgia, 'Times New Roman', serif",
+      }}
+    >
+      <header
+        className="px-5 py-5 sm:px-8"
+        style={{ borderBottom: "2px solid #C7B896" }}
+      >
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h1 className="text-2xl sm:text-3xl tracking-wide" style={{ letterSpacing: "0.03em" }}>
+              Rodinný rodokmen
+            </h1>
+            <p
+              className="text-xs sm:text-sm mt-1"
+              style={{ fontFamily: "Georgia, serif", color: "#6B6250" }}
+            >
+              Rodinný archiv &middot; {people.length}{" "}
+              {people.length === 1 ? "osoba" : people.length >= 2 && people.length <= 4 ? "osoby" : "osob"}
+            </p>
+            <p className="text-xs mt-1" style={{ color: "#6B6250" }}>
+              {userEmail} &middot;{" "}
+              <button
+                onClick={onLogout}
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  color: "#6B6250",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  textDecoration: "underline",
+                }}
+              >
+                odhlásit se
+              </button>
+            </p>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <input
+              ref={importInputRef}
+              type="file"
+              accept="application/json"
+              onChange={handleImportFile}
+              style={{ display: "none" }}
+            />
+            <button
+              onClick={triggerImport}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #6B6250",
+                color: "#2E2A24",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Obnovit zálohu
+            </button>
+            <button
+              onClick={exportBackup}
+              disabled={people.length === 0}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #6B6250",
+                color: people.length === 0 ? "#B9BEA8" : "#2E2A24",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Zálohovat (JSON)
+            </button>
+            <button
+              onClick={() => setView("suggest")}
+              disabled={people.length < 2}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #5F6F52",
+                color: people.length < 2 ? "#B9BEA8" : "#5F6F52",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Návrhy vztahů
+            </button>
+            <button
+              onClick={() => setView("map")}
+              disabled={people.length === 0}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #5F6F52",
+                color: people.length === 0 ? "#B9BEA8" : "#5F6F52",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Mapa
+            </button>
+            <button
+              onClick={() => setView("print")}
+              disabled={people.length === 0}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #5F6F52",
+                color: people.length === 0 ? "#B9BEA8" : "#5F6F52",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Tisk stromu
+            </button>
+            <button
+              onClick={exportGedcom}
+              disabled={people.length === 0}
+              className="px-3 py-2 text-sm"
+              style={{
+                border: "1px solid #6B6250",
+                color: people.length === 0 ? "#B9BEA8" : "#2E2A24",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+                background: "transparent",
+              }}
+            >
+              Export GEDCOM
+            </button>
+            <button
+              onClick={startNew}
+              className="px-4 py-2 text-sm"
+              style={{
+                background: "#8B3A3A",
+                color: "#F3ECD9",
+                borderRadius: "2px",
+                fontFamily: "'Courier New', monospace",
+                letterSpacing: "0.05em",
+              }}
+            >
+              + Přidat osobu
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {saveError && (
+        <div
+          className="px-5 sm:px-8 py-2 text-xs"
+          style={{ background: "#8B3A3A", color: "#F3ECD9" }}
+        >
+          Uložení se nezdařilo. Zkontrolujte připojení a zkuste to znovu.
+        </div>
+      )}
+
+      <div className="flex flex-col lg:flex-row">
+        {/* LEFT: list */}
+        <div className="w-full lg:w-1/2 px-5 sm:px-8 py-5" style={{ borderRight: "2px solid #C7B896" }}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Hledat jméno, profesi, místo…"
+            className="w-full px-3 py-2 mb-4 text-sm outline-none"
+            style={{
+              background: "#FBF7EC",
+              border: "1px solid #C7B896",
+              borderRadius: "2px",
+              fontFamily: "'Courier New', monospace",
+            }}
+          />
+
+          {!loaded && (
+            <p className="text-sm" style={{ color: "#6B6250" }}>
+              Načítám záznamy…
+            </p>
+          )}
+
+          {loaded && filtered.length === 0 && (
+            <div
+              className="text-sm p-6 text-center"
+              style={{ border: "1px dashed #C7B896", color: "#6B6250" }}
+            >
+              {people.length === 0
+                ? "Zatím žádné záznamy. Přidejte první osobu."
+                : "Žádná osoba neodpovídá hledání."}
+            </div>
+          )}
+
+          <div className="grid sm:grid-cols-2 gap-3">
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => {
+                  setSelectedId(p.id);
+                  setEditing(null);
+                }}
+                className="text-left p-3 transition-colors"
+                style={{
+                  background: selectedId === p.id ? "#EFE4C6" : "#FBF7EC",
+                  border: `1px solid ${selectedId === p.id ? "#8B3A3A" : "#C7B896"}`,
+                  borderRadius: "2px",
+                }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="flex items-center justify-center shrink-0"
+                    style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: "50%",
+                      background: "#5F6F52",
+                      color: "#F3ECD9",
+                      fontFamily: "'Courier New', monospace",
+                      fontSize: 13,
+                    }}
+                  >
+                    {initials(p)}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{personLabel(p)}</div>
+                    <div className="text-xs truncate" style={{ color: "#6B6250" }}>
+                      {p.datumNarozeni || "?"} {p.datumUmrti ? `– ${p.datumUmrti}` : ""}
+                    </div>
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* RIGHT: detail / editor */}
+        <div className="w-full lg:w-1/2 px-5 sm:px-8 py-5">
+          {editing && (
+            <PersonForm
+              draft={editing}
+              setDraft={setEditing}
+              onCancel={() => setEditing(null)}
+              onSave={saveEditing}
+              isNew={!people.some((p) => p.id === editing.id)}
+            />
+          )}
+
+          {!editing && selected && (
+            <div>
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="text-xl">{personLabel(selected)}</h2>
+                  {selected.profese && (
+                    <p className="text-sm italic" style={{ color: "#6B6250" }}>
+                      {selected.profese}
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={() => startEdit(selected)}
+                    className="px-3 py-1.5 text-xs"
+                    style={{
+                      border: "1px solid #C7B896",
+                      borderRadius: "2px",
+                      fontFamily: "'Courier New', monospace",
+                    }}
+                  >
+                    Upravit
+                  </button>
+                  <button
+                    onClick={() => deletePerson(selected.id)}
+                    className="px-3 py-1.5 text-xs"
+                    style={{
+                      border: "1px solid #8B3A3A",
+                      color: "#8B3A3A",
+                      borderRadius: "2px",
+                      fontFamily: "'Courier New', monospace",
+                    }}
+                  >
+                    Smazat
+                  </button>
+                </div>
+              </div>
+
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm mb-6">
+                {FIELDS.slice(2).map(([key, label]) =>
+                  selected[key] ? (
+                    <React.Fragment key={key}>
+                      <dt style={{ color: "#6B6250" }}>{label}</dt>
+                      <dd>{selected[key]}</dd>
+                    </React.Fragment>
+                  ) : null
+                )}
+              </dl>
+
+              {selected.poznamka && (
+                <div
+                  className="text-sm mb-6 p-3"
+                  style={{ background: "#FBF7EC", border: "1px solid #C7B896" }}
+                >
+                  {selected.poznamka}
+                </div>
+              )}
+
+              <div style={{ borderTop: "1px solid #C7B896" }} className="pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm uppercase tracking-wide" style={{ color: "#6B6250" }}>
+                    Příbuzenské vztahy
+                  </h3>
+                  <button
+                    onClick={() => setAddingRel((v) => !v)}
+                    className="text-xs px-2 py-1"
+                    style={{
+                      border: "1px solid #5F6F52",
+                      color: "#5F6F52",
+                      borderRadius: "2px",
+                    }}
+                  >
+                    + Přidat vztah
+                  </button>
+                </div>
+
+                {addingRel && (
+                  <div
+                    className="mb-4 p-3 flex flex-col gap-2"
+                    style={{ background: "#FBF7EC", border: "1px solid #C7B896" }}
+                  >
+                    <label className="text-xs" style={{ color: "#6B6250" }}>
+                      Vztah: {personLabel(selected)} má jako…
+                    </label>
+                    <select
+                      value={relDraft.type}
+                      onChange={(e) => setRelDraft((d) => ({ ...d, type: e.target.value }))}
+                      className="px-2 py-1.5 text-sm"
+                      style={{ border: "1px solid #C7B896" }}
+                    >
+                      {REL_TYPES.map((r) => (
+                        <option key={r.value} value={r.value}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={relDraft.targetId}
+                      onChange={(e) => setRelDraft((d) => ({ ...d, targetId: e.target.value }))}
+                      className="px-2 py-1.5 text-sm"
+                      style={{ border: "1px solid #C7B896" }}
+                    >
+                      <option value="">— vyberte osobu —</option>
+                      {people
+                        .filter((p) => p.id !== selected.id)
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {personLabel(p)}
+                          </option>
+                        ))}
+                    </select>
+                    <div className="flex gap-2 justify-end mt-1">
+                      <button
+                        onClick={() => setAddingRel(false)}
+                        className="text-xs px-3 py-1.5"
+                        style={{ border: "1px solid #C7B896", borderRadius: "2px" }}
+                      >
+                        Zrušit
+                      </button>
+                      <button
+                        onClick={addRelationship}
+                        disabled={!relDraft.targetId}
+                        className="text-xs px-3 py-1.5"
+                        style={{
+                          background: relDraft.targetId ? "#5F6F52" : "#B9BEA8",
+                          color: "#F3ECD9",
+                          borderRadius: "2px",
+                        }}
+                      >
+                        Uložit vztah
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {selectedRels.length === 0 && !addingRel && (
+                  <p className="text-sm" style={{ color: "#6B6250" }}>
+                    Zatím žádné zaznamenané vztahy.
+                  </p>
+                )}
+
+                <ul className="flex flex-col gap-2">
+                  {selectedRels.map((r) => (
+                    <li
+                      key={r.id}
+                      className="flex items-center justify-between text-sm px-3 py-2"
+                      style={{ background: "#FBF7EC", border: "1px solid #C7B896" }}
+                    >
+                      <button
+                        className="text-left underline decoration-dotted"
+                        onClick={() => setSelectedId(r.person.id)}
+                      >
+                        {relLabel(r.type)}: {personLabel(r.person)}
+                      </button>
+                      <button
+                        onClick={() => removeRelationship(r)}
+                        className="text-xs shrink-0 ml-2"
+                        style={{ color: "#8B3A3A" }}
+                      >
+                        odebrat
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {!editing && !selected && (
+            <div
+              className="h-full flex items-center justify-center text-center p-8"
+              style={{ color: "#6B6250" }}
+            >
+              <p className="text-sm">
+                Vyberte osobu ze seznamu vlevo, nebo přidejte novou pomocí tlačítka
+                „+ Přidat osobu“.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PersonForm({ draft, setDraft, onCancel, onSave, isNew }) {
+  const set = (key) => (e) => setDraft((d) => ({ ...d, [key]: e.target.value }));
+  return (
+    <div>
+      <h2 className="text-lg mb-4">{isNew ? "Nová osoba" : "Upravit osobu"}</h2>
+      <div className="grid sm:grid-cols-2 gap-3">
+        {FIELDS.map(([key, label]) => (
+          <div key={key} className={key === "profese" ? "sm:col-span-2" : ""}>
+            <label className="text-xs block mb-1" style={{ color: "#6B6250" }}>
+              {label}
+            </label>
+            <input
+              value={draft[key]}
+              onChange={set(key)}
+              className="w-full px-2 py-1.5 text-sm"
+              style={{ border: "1px solid #C7B896", background: "#FBF7EC" }}
+            />
+          </div>
+        ))}
+        <div className="sm:col-span-2">
+          <label className="text-xs block mb-1" style={{ color: "#6B6250" }}>
+            Poznámka
+          </label>
+          <textarea
+            value={draft.poznamka}
+            onChange={set("poznamka")}
+            rows={3}
+            className="w-full px-2 py-1.5 text-sm"
+            style={{ border: "1px solid #C7B896", background: "#FBF7EC" }}
+          />
+        </div>
+      </div>
+      <div className="flex gap-2 justify-end mt-4">
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 text-sm"
+          style={{ border: "1px solid #C7B896", borderRadius: "2px" }}
+        >
+          Zrušit
+        </button>
+        <button
+          onClick={onSave}
+          className="px-4 py-1.5 text-sm"
+          style={{ background: "#8B3A3A", color: "#F3ECD9", borderRadius: "2px" }}
+        >
+          Uložit
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---- GEDCOM export ----
+// Builds a simple GEDCOM 5.5.1 file. Pohlaví se v aplikaci nezaznamenává,
+// proto se u dvojice první osoba zapíše jako HUSB a druhá jako WIFE bez
+// ohledu na skutečné pohlaví — v genealogickém programu lze snadno opravit.
+function buildGedcom(people, relationships) {
+  const idMap = new Map(people.map((p, i) => [p.id, `I${i + 1}`]));
+  const partnerOf = (id) =>
+    relationships.find((r) => r.personId === id && r.type === "partner")?.targetId;
+  const childrenOf = (id) =>
+    relationships.filter((r) => r.personId === id && r.type === "dite").map((r) => r.targetId);
+  const parentsOf = (id) =>
+    relationships.filter((r) => r.personId === id && r.type === "rodic").map((r) => r.targetId);
+
+  const famKey = (ids) => [...ids].sort().join("|");
+  const families = new Map(); // key -> { parents: [ids], children: Set }
+
+  const seenCouples = new Set();
+  people.forEach((p) => {
+    const partnerId = partnerOf(p.id);
+    if (!partnerId) return;
+    const ck = famKey([p.id, partnerId]);
+    if (seenCouples.has(ck)) return;
+    seenCouples.add(ck);
+    families.set(ck, { parents: [p.id, partnerId], children: new Set() });
+  });
+
+  people.forEach((child) => {
+    const parents = parentsOf(child.id);
+    if (parents.length === 0) return;
+    const key = famKey(parents);
+    if (!families.has(key)) families.set(key, { parents, children: new Set() });
+    families.get(key).children.add(child.id);
+  });
+
+  const famList = [...families.values()];
+  const famIdMap = new Map(famList.map((f, i) => [f, `F${i + 1}`]));
+
+  const famcOf = new Map(); // childId -> famId
+  const famsOf = new Map(); // parentId -> [famId,...]
+  famList.forEach((f) => {
+    const fid = famIdMap.get(f);
+    f.parents.forEach((pid) => {
+      if (!famsOf.has(pid)) famsOf.set(pid, []);
+      famsOf.get(pid).push(fid);
+    });
+    f.children.forEach((cid) => famcOf.set(cid, fid));
+  });
+
+  const lines = [];
+  lines.push("0 HEAD");
+  lines.push("1 SOUR RodinnyRodokmen");
+  lines.push("1 GEDC");
+  lines.push("2 VERS 5.5.1");
+  lines.push("2 FORM LINEAGE-LINKED");
+  lines.push("1 CHAR UTF-8");
+
+  people.forEach((p) => {
+    const gid = idMap.get(p.id);
+    lines.push(`0 @${gid}@ INDI`);
+    lines.push(`1 NAME ${p.jmeno || ""} /${p.prijmeni || ""}/`);
+    lines.push("1 SEX U");
+    if (p.datumNarozeni || p.mistoNarozeni) {
+      lines.push("1 BIRT");
+      if (p.datumNarozeni) lines.push(`2 DATE ${p.datumNarozeni}`);
+      if (p.mistoNarozeni) lines.push(`2 PLAC ${p.mistoNarozeni}`);
+    }
+    if (p.datumUmrti || p.mistoUmrti || p.zpusobUmrti) {
+      lines.push("1 DEAT Y");
+      if (p.datumUmrti) lines.push(`2 DATE ${p.datumUmrti}`);
+      if (p.mistoUmrti) lines.push(`2 PLAC ${p.mistoUmrti}`);
+      if (p.zpusobUmrti) lines.push(`2 CAUS ${p.zpusobUmrti}`);
+    }
+    if (p.profese) lines.push(`1 OCCU ${p.profese}`);
+    if (p.poznamka) lines.push(`1 NOTE ${p.poznamka.replace(/\r?\n/g, " ")}`);
+    if (famcOf.has(p.id)) lines.push(`1 FAMC @${famcOf.get(p.id)}@`);
+    (famsOf.get(p.id) || []).forEach((fid) => lines.push(`1 FAMS @${fid}@`));
+  });
+
+  famList.forEach((f) => {
+    const fid = famIdMap.get(f);
+    lines.push(`0 @${fid}@ FAM`);
+    if (f.parents[0]) lines.push(`1 HUSB @${idMap.get(f.parents[0])}@`);
+    if (f.parents[1]) lines.push(`1 WIFE @${idMap.get(f.parents[1])}@`);
+    const p0 = people.find((p) => p.id === f.parents[0]);
+    const p1 = f.parents[1] ? people.find((p) => p.id === f.parents[1]) : null;
+    const marrDate = (p0 && p0.datumSnatku) || (p1 && p1.datumSnatku);
+    const marrPlace = (p0 && p0.mistoSnatku) || (p1 && p1.mistoSnatku);
+    if (f.parents.length > 1 && (marrDate || marrPlace)) {
+      lines.push("1 MARR");
+      if (marrDate) lines.push(`2 DATE ${marrDate}`);
+      if (marrPlace) lines.push(`2 PLAC ${marrPlace}`);
+    }
+    [...f.children].forEach((cid) => lines.push(`1 CHIL @${idMap.get(cid)}@`));
+  });
+
+  lines.push("0 TRLR");
+  return lines.join("\n");
+}
+
+// ---- Printable tree view ----
+function PrintTree({ people, relationships, onBack }) {
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const partnerOf = (id) =>
+    relationships.find((r) => r.personId === id && r.type === "partner")?.targetId;
+  const childrenOf = (id) =>
+    relationships.filter((r) => r.personId === id && r.type === "dite").map((r) => r.targetId);
+  const hasParent = (id) =>
+    relationships.some((r) => r.personId === id && r.type === "rodic");
+
+  const hasAnyRel = (id) =>
+    relationships.some((r) => r.personId === id || r.targetId === id);
+
+  const visited = new Set();
+
+  function personBox(p) {
+    const years = `${p.datumNarozeni || "?"}${p.datumUmrti ? " – " + p.datumUmrti : ""}`;
+    return (
+      <div className="pt-person">
+        <div className="pt-name">{`${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)"}</div>
+        {(p.datumNarozeni || p.datumUmrti) && <div className="pt-years">{years}</div>}
+        {p.profese && <div className="pt-years">{p.profese}</div>}
+      </div>
+    );
+  }
+
+  function birthYear(p) {
+    const m = (p.datumNarozeni || "").match(/\d{4}/);
+    return m ? parseInt(m[0], 10) : null;
+  }
+
+  function groupByPeriod(list, bandSize = 20) {
+    const withYear = list
+      .map((p) => ({ p, y: birthYear(p) }))
+      .filter((x) => x.y !== null);
+    const withoutYear = list.filter((p) => birthYear(p) === null);
+    const bands = [];
+    if (withYear.length > 0) {
+      const minY = Math.min(...withYear.map((x) => x.y));
+      const maxY = Math.max(...withYear.map((x) => x.y));
+      const start0 = Math.floor(minY / bandSize) * bandSize;
+      for (let start = start0; start <= maxY; start += bandSize) {
+        const end = start + bandSize - 1;
+        const members = withYear
+          .filter((x) => x.y >= start && x.y <= end)
+          .sort((a, b) => a.y - b.y)
+          .map((x) => x.p);
+        if (members.length > 0) bands.push({ label: `${start}–${end}`, members });
+      }
+    }
+    if (withoutYear.length > 0) bands.push({ label: "Neznámé období", members: withoutYear });
+    return bands;
+  }
+
+  function renderNode(id) {
+    if (visited.has(id)) return null;
+    const p = byId.get(id);
+    if (!p) return null;
+    visited.add(id);
+    const partnerId = partnerOf(id);
+    const partner = partnerId ? byId.get(partnerId) : null;
+    if (partner) visited.add(partnerId);
+
+    const childIds = [
+      ...new Set([...childrenOf(id), ...(partnerId ? childrenOf(partnerId) : [])]),
+    ].filter((cid) => !visited.has(cid));
+
+    return (
+      <li key={id}>
+        <div className="pt-couple">
+          {personBox(p)}
+          {partner && <span className="pt-plus">&amp;</span>}
+          {partner && personBox(partner)}
+        </div>
+        {childIds.length > 0 && <ul>{childIds.map((cid) => renderNode(cid))}</ul>}
+      </li>
+    );
+  }
+
+  const rootNodes = people
+    .filter((p) => hasAnyRel(p.id) && !hasParent(p.id))
+    .filter((p) => !visited.has(p.id))
+    .map((p) => renderNode(p.id));
+
+  const unassigned = people.filter((p) => !visited.has(p.id));
+  const periodBands = groupByPeriod(unassigned);
+
+  return (
+    <div className="pt-wrap">
+      <style>{`
+        @media print {
+          .no-print { display: none !important; }
+          @page { margin: 14mm; }
+        }
+        .pt-wrap { font-family: Georgia, 'Times New Roman', serif; background: #fff; color: #2E2A24; min-height: 100vh; padding: 24px; }
+        .pt-toolbar { display:flex; gap:10px; margin-bottom: 20px; }
+        .pt-toolbar button { font-family: 'Courier New', monospace; font-size: 13px; padding: 8px 14px; border-radius:2px; cursor:pointer; }
+        .pt-tree ul { list-style:none; margin:0; display:flex; justify-content:center; padding-top:24px; position:relative; }
+        .pt-tree { display:flex; justify-content:center; }
+        .pt-tree li { list-style:none; position:relative; display:flex; flex-direction:column; align-items:center; padding: 24px 10px 0 10px; }
+        .pt-tree li::before, .pt-tree li::after { content:''; position:absolute; top:0; right:50%; border-top:1.5px solid #B9AA7C; width:50%; height:24px; }
+        .pt-tree li::after { right:auto; left:50%; border-left:1.5px solid #B9AA7C; }
+        .pt-tree li:only-child::after, .pt-tree li:only-child::before { display:none; }
+        .pt-tree li:only-child { padding-top:0; }
+        .pt-tree li:first-child::before, .pt-tree li:last-child::after { border:0 none; }
+        .pt-tree li:last-child::before { border-right:1.5px solid #B9AA7C; border-radius:0 4px 0 0; }
+        .pt-tree li:first-child::after { border-radius:4px 0 0 0; }
+        .pt-tree > ul > li { padding-top: 0; }
+        .pt-tree > ul > li::before, .pt-tree > ul > li::after { display:none; }
+        .pt-tree ul ul::before { content:''; position:absolute; top:0; left:50%; border-left:1.5px solid #B9AA7C; width:0; height:24px; }
+        .pt-couple { display:flex; align-items:center; gap:8px; }
+        .pt-person { border:1px solid #B9AA7C; background:#FBF7EC; padding:6px 10px; border-radius:3px; min-width:110px; text-align:center; }
+        .pt-name { font-size:12px; font-weight:600; }
+        .pt-years { font-size:10px; color:#6B6250; }
+        .pt-plus { font-size:12px; color:#6B6250; }
+        .pt-unassigned { margin-top: 48px; border-top: 1.5px dashed #B9AA7C; padding-top: 20px; }
+        .pt-unassigned-title { font-size: 13px; font-weight: 600; margin-bottom: 14px; color: #6B6250; }
+        .pt-period-row { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+        .pt-period-label { width: 90px; flex-shrink: 0; font-size: 11px; color: #6B6250; padding-top: 8px; }
+        .pt-period-members { display: flex; flex-wrap: wrap; gap: 10px; flex: 1; }
+      `}</style>
+      <div className="pt-toolbar no-print">
+        <button
+          onClick={onBack}
+          style={{ border: "1px solid #C7B896", background: "transparent", color: "#2E2A24" }}
+        >
+          ← Zpět
+        </button>
+        <button
+          onClick={() => window.print()}
+          style={{ background: "#8B3A3A", color: "#F3ECD9", border: "none" }}
+        >
+          Tisknout
+        </button>
+      </div>
+      <h1 style={{ fontSize: 22, marginBottom: 4 }}>Rodinný strom</h1>
+      <p style={{ fontSize: 12, color: "#6B6250", marginBottom: 20 }}>{people.length} osob</p>
+
+      {rootNodes.length > 0 ? (
+        <div className="pt-tree">
+          <ul>{rootNodes}</ul>
+        </div>
+      ) : (
+        <p style={{ fontSize: 13 }}>
+          Nejsou zaznamenány žádné vztahy rodič–dítě, strom nelze sestavit.
+        </p>
+      )}
+
+      {periodBands.length > 0 && (
+        <div className="pt-unassigned">
+          <div className="pt-unassigned-title">
+            Zatím nepřipojené osoby &middot; podle období, kdy žily
+          </div>
+          {periodBands.map((band) => (
+            <div className="pt-period-row" key={band.label}>
+              <div className="pt-period-label">{band.label}</div>
+              <div className="pt-period-members">
+                {band.members.map((p) => (
+                  <div key={p.id}>{personBox(p)}</div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Map view (Leaflet + OpenStreetMap, geocoding via Nominatim) ----
+function loadLeaflet() {
+  return new Promise((resolve, reject) => {
+    if (window.L) {
+      resolve(window.L);
+      return;
+    }
+    if (!document.getElementById("leaflet-css")) {
+      const link = document.createElement("link");
+      link.id = "leaflet-css";
+      link.rel = "stylesheet";
+      link.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+      document.head.appendChild(link);
+    }
+    const existing = document.getElementById("leaflet-js");
+    if (existing) {
+      const check = setInterval(() => {
+        if (window.L) {
+          clearInterval(check);
+          resolve(window.L);
+        }
+      }, 100);
+      setTimeout(() => {
+        clearInterval(check);
+        if (!window.L) reject(new Error("Časový limit načítání mapy"));
+      }, 8000);
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "leaflet-js";
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+    script.onload = () => resolve(window.L);
+    script.onerror = () => reject(new Error("Nepodařilo se načíst mapovou knihovnu"));
+    document.head.appendChild(script);
+  });
+}
+
+function MapView({ people, onBack }) {
+  const mapDivRef = useRef(null);
+  const mapRef = useRef(null);
+  const markersRef = useRef([]);
+  const [status, setStatus] = useState("loading"); // loading | ready | error
+  const [errorMsg, setErrorMsg] = useState("");
+  const [geocache, setGeocache] = useState({});
+
+  const events = useMemo(() => {
+    const list = [];
+    people.forEach((p) => {
+      const name = `${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)";
+      if (p.mistoNarozeni)
+        list.push({ place: p.mistoNarozeni.trim(), type: "narození", date: p.datumNarozeni, name });
+      if (p.mistoSnatku)
+        list.push({ place: p.mistoSnatku.trim(), type: "sňatek", date: p.datumSnatku, name });
+      if (p.mistoUmrti)
+        list.push({ place: p.mistoUmrti.trim(), type: "úmrtí", date: p.datumUmrti, name });
+    });
+    return list.filter((e) => e.place);
+  }, [people]);
+
+  const places = useMemo(() => {
+    const map = new Map();
+    events.forEach((e) => {
+      const key = e.place.toLowerCase();
+      if (!map.has(key)) map.set(key, { key, display: e.place, events: [] });
+      map.get(key).events.push(e);
+    });
+    return [...map.values()];
+  }, [events]);
+
+  // load cached coordinates once
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get("geocode-cache");
+        if (res && res.value) setGeocache(JSON.parse(res.value));
+      } catch (e) {
+        // no cache yet, that's fine
+      }
+    })();
+  }, []);
+
+  // init the Leaflet map once
+  useEffect(() => {
+    let cancelled = false;
+    loadLeaflet()
+      .then((L) => {
+        if (cancelled || !mapDivRef.current || mapRef.current) return;
+        L.Icon.Default.mergeOptions({
+          iconRetinaUrl:
+            "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png",
+          iconUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png",
+          shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png",
+        });
+        const map = L.map(mapDivRef.current).setView([49.8, 15.5], 6);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 18,
+          attribution: "&copy; OpenStreetMap contributors",
+        }).addTo(map);
+        mapRef.current = map;
+        setStatus("ready");
+      })
+      .catch((e) => {
+        setStatus("error");
+        setErrorMsg(e.message || "");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // geocode any places not yet in cache, one at a time (Nominatim rate limit)
+  useEffect(() => {
+    if (places.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next = { ...geocache };
+      let changed = false;
+      for (const pl of places) {
+        if (cancelled) break;
+        if (Object.prototype.hasOwnProperty.call(next, pl.key)) continue;
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+              pl.display
+            )}`
+          );
+          const data = await res.json();
+          next[pl.key] =
+            data && data[0] ? { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) } : null;
+        } catch (e) {
+          next[pl.key] = null;
+        }
+        changed = true;
+        if (!cancelled) setGeocache({ ...next });
+        await new Promise((r) => setTimeout(r, 1100));
+      }
+      if (changed && !cancelled) {
+        try {
+          await window.storage.set("geocode-cache", JSON.stringify(next));
+        } catch (e) {
+          // cache save failure is non-critical
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [places]);
+
+  // (re)draw markers whenever coordinates or the map become available
+  useEffect(() => {
+    if (status !== "ready" || !mapRef.current || !window.L) return;
+    const L = window.L;
+    markersRef.current.forEach((m) => mapRef.current.removeLayer(m));
+    markersRef.current = [];
+    const bounds = [];
+    places.forEach((pl) => {
+      const coord = geocache[pl.key];
+      if (!coord) return;
+      bounds.push([coord.lat, coord.lon]);
+      const popupHtml =
+        `<div style="font-family:Georgia,serif;font-size:13px;line-height:1.5;">` +
+        `<strong>${pl.display}</strong><br/>` +
+        pl.events
+          .slice()
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+          .map((e) => `${e.type}: ${e.name}${e.date ? " (" + e.date + ")" : ""}`)
+          .join("<br/>") +
+        `</div>`;
+      const marker = L.marker([coord.lat, coord.lon]).addTo(mapRef.current).bindPopup(popupHtml);
+      markersRef.current.push(marker);
+    });
+    if (bounds.length > 0) {
+      mapRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+    }
+  }, [geocache, status, places]);
+
+  const notFound = places.filter((pl) => geocache[pl.key] === null);
+  const pendingCount = places.filter((pl) => !(pl.key in geocache)).length;
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#F3ECD9",
+        color: "#2E2A24",
+        fontFamily: "Georgia, 'Times New Roman', serif",
+      }}
+    >
+      <div
+        className="flex items-center gap-3 px-5 py-4 flex-wrap"
+        style={{ borderBottom: "2px solid #C7B896" }}
+      >
+        <button
+          onClick={onBack}
+          className="px-3 py-2 text-sm"
+          style={{
+            border: "1px solid #C7B896",
+            borderRadius: "2px",
+            fontFamily: "'Courier New', monospace",
+            background: "transparent",
+          }}
+        >
+          ← Zpět
+        </button>
+        <h1 className="text-lg">Mapa míst</h1>
+        {pendingCount > 0 && (
+          <span className="text-xs" style={{ color: "#6B6250" }}>
+            Vyhledávám polohu… (zbývá {pendingCount})
+          </span>
+        )}
+      </div>
+
+      {places.length === 0 ? (
+        <p className="p-6 text-sm" style={{ color: "#6B6250" }}>
+          Zatím nejsou u žádné osoby zaznamenána místa narození, sňatku ani úmrtí.
+        </p>
+      ) : (
+        <>
+          {status === "error" && (
+            <div className="p-4 text-sm" style={{ background: "#8B3A3A", color: "#F3ECD9" }}>
+              Mapu se nepodařilo načíst{errorMsg ? ` (${errorMsg})` : ""}. Zkuste stránku znovu
+              otevřít.
+            </div>
+          )}
+          <div ref={mapDivRef} style={{ height: "65vh", width: "100%" }} />
+          <div className="px-5 py-3 text-xs" style={{ color: "#6B6250" }}>
+            Podklad © OpenStreetMap contributors &middot; poloha míst přes Nominatim.
+          </div>
+          {notFound.length > 0 && (
+            <div className="px-5 pb-6 text-sm">
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                Nepodařilo se najít na mapě (zkuste upravit název místa u dané osoby):
+              </div>
+              <ul style={{ paddingLeft: 18 }}>
+                {notFound.map((pl) => (
+                  <li key={pl.key}>{pl.display}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- Relationship suggestions view ----
+function SuggestionsView({ people, relationships, setRelationships, onBack }) {
+  const [dismissed, setDismissed] = useState(new Set());
+
+  const suggestions = useMemo(
+    () => generateSuggestions(people, relationships),
+    [people, relationships]
+  );
+
+  const keyOf = (s) =>
+    s.type === "parent-child" ? pairKey(s.parent.id, s.child.id) : pairKey(s.a.id, s.b.id);
+
+  const visible = suggestions.filter((s) => !dismissed.has(keyOf(s)));
+
+  function apply(s) {
+    let personId, targetId, type;
+    if (s.type === "parent-child") {
+      personId = s.parent.id;
+      targetId = s.child.id;
+      type = "dite";
+    } else {
+      personId = s.a.id;
+      targetId = s.b.id;
+      type = s.type;
+    }
+    const already = relationships.some(
+      (r) => r.personId === personId && r.targetId === targetId && r.type === type
+    );
+    if (already) return;
+    setRelationships((prev) => [...prev, ...makeRelationshipPair(personId, targetId, type)]);
+  }
+
+  function dismiss(s) {
+    setDismissed((prev) => new Set(prev).add(keyOf(s)));
+  }
+
+  const nameOf = (p) => `${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)";
+  const typeLabel = { partner: "manžel/manželka", sourozenec: "sourozenec", "parent-child": "rodič – dítě" };
+  const confLabel = { 3: "vysoká shoda", 2: "střední shoda", 1: "nízká shoda" };
+  const confColor = { 3: "#5F6F52", 2: "#8B6F3A", 1: "#9C8F73" };
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#F3ECD9",
+        color: "#2E2A24",
+        fontFamily: "Georgia, 'Times New Roman', serif",
+      }}
+    >
+      <div
+        className="flex items-center gap-3 px-5 py-4 flex-wrap"
+        style={{ borderBottom: "2px solid #C7B896" }}
+      >
+        <button
+          onClick={onBack}
+          className="px-3 py-2 text-sm"
+          style={{
+            border: "1px solid #C7B896",
+            borderRadius: "2px",
+            fontFamily: "'Courier New', monospace",
+            background: "transparent",
+          }}
+        >
+          ← Zpět
+        </button>
+        <h1 className="text-lg">Návrhy příbuzenských vztahů</h1>
+      </div>
+
+      <div className="px-5 py-4 text-sm" style={{ color: "#6B6250", maxWidth: 680 }}>
+        Odhad pro osoby, které zatím nemají zaznamenaný žádný vztah — na základě roku narození
+        (rodič mohl mít dítě nejdříve v 18 letech, nejpozději v 60) a shody míst narození nebo
+        sňatku. Jde jen o návrh, vždy si ověřte, jestli dává smysl.
+      </div>
+
+      <div className="px-5 pb-8">
+        {visible.length === 0 ? (
+          <p className="text-sm" style={{ color: "#6B6250" }}>
+            {suggestions.length === 0
+              ? "Zatím není dost údajů (data narození, místa) na to, aby šlo něco navrhnout."
+              : "Žádné další návrhy — všechny jste už vyřešili nebo skryli."}
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3" style={{ maxWidth: 680 }}>
+            {visible.map((s, idx) => (
+              <div
+                key={idx}
+                className="p-3"
+                style={{
+                  background: "#FBF7EC",
+                  border: "1px solid #C7B896",
+                  borderLeft: `4px solid ${confColor[s.confidence]}`,
+                  borderRadius: "2px",
+                }}
+              >
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <div className="text-sm font-semibold">
+                      {s.type === "parent-child"
+                        ? `${nameOf(s.parent)} → ${nameOf(s.child)}`
+                        : `${nameOf(s.a)}  &  ${nameOf(s.b)}`}
+                    </div>
+                    <div className="text-xs" style={{ color: "#6B6250" }}>
+                      {typeLabel[s.type]} &middot; {s.reason}
+                    </div>
+                  </div>
+                  <span className="text-xs" style={{ color: confColor[s.confidence] }}>
+                    {confLabel[s.confidence]}
+                  </span>
+                </div>
+                <div className="flex gap-2 justify-end mt-2">
+                  <button
+                    onClick={() => dismiss(s)}
+                    className="text-xs px-3 py-1.5"
+                    style={{ border: "1px solid #C7B896", borderRadius: "2px" }}
+                  >
+                    Skrýt
+                  </button>
+                  <button
+                    onClick={() => apply(s)}
+                    className="text-xs px-3 py-1.5"
+                    style={{ background: "#5F6F52", color: "#F3ECD9", borderRadius: "2px" }}
+                  >
+                    Přidat vztah
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<Root />);
+</script>
+</body>
+</html>
