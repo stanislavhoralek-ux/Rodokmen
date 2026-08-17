@@ -4,7 +4,6 @@
 <meta charset="UTF-8" />
 <title>Rodinný rodokmen</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<link rel="manifest" id="pwa-manifest" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
@@ -21,8 +20,8 @@
 
 <script>
   // ====== DOPLŇTE SVOJE ÚDAJE ZE SUPABASE (Project Settings → API) ======
-  const SUPABASE_URL = "https://hguyzftnwebisipxpbeo.supabase.co";
-  const SUPABASE_ANON_KEY = "sb_publishable_6Rz5Tk_VALWqOSbZqegSTg_IU5pGuFA";
+  const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+  const SUPABASE_ANON_KEY = "YOUR-ANON-PUBLIC-KEY";
   // ========================================================================
 
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -63,6 +62,7 @@ function personToRow(p) {
     id: p.id,
     jmeno: p.jmeno || "",
     prijmeni: p.prijmeni || "",
+    rodne_prijmeni: p.rodnePrijmeni || "",
     datum_narozeni: p.datumNarozeni || "",
     misto_narozeni: p.mistoNarozeni || "",
     datum_snatku: p.datumSnatku || "",
@@ -79,6 +79,7 @@ function rowToPerson(r) {
     id: r.id,
     jmeno: r.jmeno || "",
     prijmeni: r.prijmeni || "",
+    rodnePrijmeni: r.rodne_prijmeni || "",
     datumNarozeni: r.datum_narozeni || "",
     mistoNarozeni: r.misto_narozeni || "",
     datumSnatku: r.datum_snatku || "",
@@ -97,16 +98,40 @@ function rowToRel(r) {
   return { id: r.id, personId: r.person_id, targetId: r.target_id, type: r.type };
 }
 
-// ---- auth ----
+// ---- auth: anonymous sign-in, no e-mail/heslo potřeba ----
 function Root() {
-  const [session, setSession] = useState(undefined); // undefined = loading, null = signed out
+  const [session, setSession] = useState(undefined); // undefined = loading
+  const [authError, setAuthError] = useState("");
 
   useEffect(() => {
-    sb.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = sb.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    (async () => {
+      const { data } = await sb.auth.getSession();
+      if (data.session) {
+        setSession(data.session);
+        return;
+      }
+      const { data: signInData, error } = await sb.auth.signInAnonymously();
+      if (error) setAuthError(error.message);
+      else setSession(signInData.session);
+    })();
+    const { data: sub } = sb.auth.onAuthStateChange((_event, sess) => {
+      if (sess) setSession(sess);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  if (authError) {
+    return (
+      <div style={{ padding: 40, fontFamily: "Georgia, serif", color: "#8B3A3A", maxWidth: 480 }}>
+        <p style={{ fontWeight: 600, marginBottom: 8 }}>Přihlášení se nezdařilo.</p>
+        <p style={{ fontSize: 13, marginBottom: 8 }}>{authError}</p>
+        <p style={{ fontSize: 13 }}>
+          V Supabase projektu zkontrolujte Authentication → Sign In / Providers → že je
+          zapnuté „Allow anonymous sign-ins“.
+        </p>
+      </div>
+    );
+  }
   if (session === undefined) {
     return (
       <div style={{ padding: 40, fontFamily: "Georgia, serif", color: "#6B6250" }}>
@@ -114,117 +139,7 @@ function Root() {
       </div>
     );
   }
-  if (!session) {
-    return <AuthGate />;
-  }
-  return <App userEmail={session.user.email} onLogout={() => sb.auth.signOut()} />;
-}
-
-function AuthGate() {
-  const [mode, setMode] = useState("signin"); // signin | signup
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e) {
-    e.preventDefault();
-    setError("");
-    setInfo("");
-    setBusy(true);
-    try {
-      if (mode === "signin") {
-        const { error } = await sb.auth.signInWithPassword({ email, password });
-        if (error) setError(error.message);
-      } else {
-        const { error } = await sb.auth.signUp({ email, password });
-        if (error) setError(error.message);
-        else setInfo("Účet vytvořen. Pokud máte v Supabase zapnuté potvrzení e-mailu, zkontrolujte schránku.");
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "#F3ECD9",
-        fontFamily: "Georgia, 'Times New Roman', serif",
-        color: "#2E2A24",
-      }}
-    >
-      <form
-        onSubmit={submit}
-        style={{ background: "#FBF7EC", border: "1px solid #C7B896", padding: 28, width: 320, borderRadius: 3 }}
-      >
-        <h1 style={{ fontSize: 20, marginBottom: 4 }}>Rodinný rodokmen</h1>
-        <p style={{ fontSize: 12, color: "#6B6250", marginBottom: 18 }}>
-          {mode === "signin" ? "Přihlaste se ke svým datům." : "Vytvořte si účet."}
-        </p>
-        <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>E-mail</label>
-        <input
-          type="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{ width: "100%", padding: 8, marginBottom: 12, border: "1px solid #C7B896", background: "#fff", boxSizing: "border-box" }}
-        />
-        <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Heslo</label>
-        <input
-          type="password"
-          required
-          minLength={6}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={{ width: "100%", padding: 8, marginBottom: 16, border: "1px solid #C7B896", background: "#fff", boxSizing: "border-box" }}
-        />
-        {error && <p style={{ color: "#8B3A3A", fontSize: 12, marginBottom: 12 }}>{error}</p>}
-        {info && <p style={{ color: "#5F6F52", fontSize: 12, marginBottom: 12 }}>{info}</p>}
-        <button
-          type="submit"
-          disabled={busy}
-          style={{
-            width: "100%",
-            padding: "10px 0",
-            background: "#8B3A3A",
-            color: "#F3ECD9",
-            border: "none",
-            borderRadius: 2,
-            fontFamily: "'Courier New', monospace",
-            cursor: "pointer",
-          }}
-        >
-          {mode === "signin" ? "Přihlásit" : "Zaregistrovat"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode(mode === "signin" ? "signup" : "signin");
-            setError("");
-            setInfo("");
-          }}
-          style={{
-            width: "100%",
-            marginTop: 10,
-            padding: "8px 0",
-            background: "transparent",
-            border: "1px solid #C7B896",
-            borderRadius: 2,
-            fontSize: 12,
-            cursor: "pointer",
-          }}
-        >
-          {mode === "signin" ? "Nemáte účet? Zaregistrujte se" : "Už máte účet? Přihlaste se"}
-        </button>
-      </form>
-    </div>
-  );
+  return <App userEmail="tento prohlížeč / zařízení" onLogout={undefined} />;
 }
 
 
@@ -237,6 +152,14 @@ const REL_TYPES = [
 
 const relLabel = (v) => REL_TYPES.find((r) => r.value === v)?.label || v;
 
+function fullName(p) {
+  const base = `${p.jmeno || ""} ${p.prijmeni || ""}`.trim() || "(bez jména)";
+  if (p.rodnePrijmeni && p.rodnePrijmeni.trim() && p.rodnePrijmeni.trim() !== (p.prijmeni || "").trim()) {
+    return `${base} (roz. ${p.rodnePrijmeni.trim()})`;
+  }
+  return base;
+}
+
 function makeRelationshipPair(personId, targetId, type) {
   const recip = REL_TYPES.find((r) => r.value === type).reciprocal;
   return [
@@ -247,6 +170,40 @@ function makeRelationshipPair(personId, targetId, type) {
 
 function pairKey(a, b) {
   return [a, b].sort().join("|");
+}
+
+// True if candidateId already appears somewhere below ancestorId in the
+// parent->child chain (used to block creating a relationship that would
+// make someone their own ancestor).
+function isDescendantOf(candidateId, ancestorId, relationships) {
+  const stack = [ancestorId];
+  const visited = new Set();
+  while (stack.length) {
+    const cur = stack.pop();
+    if (cur === candidateId) return true;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    relationships
+      .filter((r) => r.personId === cur && r.type === "dite")
+      .forEach((r) => stack.push(r.targetId));
+  }
+  return false;
+}
+
+// Returns a warning string if a parent/child pair's birth years look
+// implausible (child not at least 18 years younger), or null if fine /
+// unknown (missing birth years are not flagged).
+function parentChildAgeGapWarning(parentId, childId, people) {
+  const parent = people.find((p) => p.id === parentId);
+  const child = people.find((p) => p.id === childId);
+  const yP = parseYear(parent && parent.datumNarozeni);
+  const yC = parseYear(child && child.datumNarozeni);
+  if (yP == null || yC == null) return null;
+  const diff = yC - yP;
+  if (diff < 18) {
+    return `Podle zadaných dat narození by rodiči bylo v době narození dítěte jen ${diff} let (případně je "dítě" starší než "rodič"). Zkontrolujte prosím data narození. Přesto vztah přidat?`;
+  }
+  return null;
 }
 
 function parseYear(dateStr) {
@@ -342,6 +299,7 @@ const emptyPerson = () => ({
   id: crypto.randomUUID(),
   jmeno: "",
   prijmeni: "",
+  rodnePrijmeni: "",
   datumNarozeni: "",
   mistoNarozeni: "",
   datumSnatku: "",
@@ -356,6 +314,7 @@ const emptyPerson = () => ({
 const FIELDS = [
   ["jmeno", "Jméno"],
   ["prijmeni", "Příjmení"],
+  ["rodnePrijmeni", "Rodné příjmení (za svobodna)"],
   ["datumNarozeni", "Datum narození"],
   ["mistoNarozeni", "Místo narození"],
   ["datumSnatku", "Datum sňatku"],
@@ -365,6 +324,8 @@ const FIELDS = [
   ["zpusobUmrti", "Způsob úmrtí"],
   ["profese", "Profese"],
 ];
+
+const PLACE_FIELDS = new Set(["mistoNarozeni", "mistoSnatku", "mistoUmrti"]);
 
 function initials(p) {
   return `${(p.jmeno || "?")[0] || ""}${(p.prijmeni || "?")[0] || ""}`.toUpperCase();
@@ -437,7 +398,7 @@ function App({ userEmail, onLogout }) {
     );
     if (!q) return sorted;
     return sorted.filter((p) =>
-      `${p.jmeno} ${p.prijmeni} ${p.profese} ${p.mistoNarozeni}`
+      `${p.jmeno} ${p.prijmeni} ${p.rodnePrijmeni || ""} ${p.profese} ${p.mistoNarozeni}`
         .toLowerCase()
         .includes(q)
     );
@@ -486,6 +447,22 @@ function App({ userEmail, onLogout }) {
       setAddingRel(false);
       return;
     }
+
+    if (type === "dite" || type === "rodic") {
+      const parentId = type === "dite" ? selected.id : relDraft.targetId;
+      const childId = type === "dite" ? relDraft.targetId : selected.id;
+      if (isDescendantOf(parentId, childId, relationships)) {
+        alert(
+          "Tenhle vztah nejde přidat — podle už zadaných vztahů by tak byla osoba sama sobě předkem (vznikl by kruh)."
+        );
+        return;
+      }
+      const warning = parentChildAgeGapWarning(parentId, childId, people);
+      if (warning && !window.confirm(warning)) {
+        return;
+      }
+    }
+
     setRelationships((prev) => [
       ...prev,
       ...makeRelationshipPair(selected.id, relDraft.targetId, type),
@@ -514,8 +491,21 @@ function App({ userEmail, onLogout }) {
       .filter((r) => r.person);
   }, [relationships, selected, people]);
 
-  const personLabel = (p) =>
-    `${p.jmeno || "(bez jména)"} ${p.prijmeni || ""}`.trim();
+  const personLabel = (p) => fullName(p);
+
+  const personPickerLabel = (p) => {
+    const details = [p.datumNarozeni, p.mistoNarozeni].filter(Boolean).join(", ");
+    return details ? `${personLabel(p)} — nar. ${details}` : personLabel(p);
+  };
+
+  function relCount(id) {
+    return relationships.filter((r) => r.personId === id).length;
+  }
+  function relWord(n) {
+    if (n === 1) return "vztah";
+    if (n >= 2 && n <= 4) return "vztahy";
+    return "vztahů";
+  }
 
   function downloadFile(filename, content, mime) {
     const blob = new Blob([content], { type: mime });
@@ -631,21 +621,27 @@ function App({ userEmail, onLogout }) {
               {people.length === 1 ? "osoba" : people.length >= 2 && people.length <= 4 ? "osoby" : "osob"}
             </p>
             <p className="text-xs mt-1" style={{ color: "#6B6250" }}>
-              {userEmail} &middot;{" "}
-              <button
-                onClick={onLogout}
-                style={{
-                  background: "none",
-                  border: "none",
-                  padding: 0,
-                  color: "#6B6250",
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                  textDecoration: "underline",
-                }}
-              >
-                odhlásit se
-              </button>
+              Data: {userEmail}
+              {onLogout && (
+                <>
+                  {" "}
+                  &middot;{" "}
+                  <button
+                    onClick={onLogout}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      color: "#6B6250",
+                      cursor: "pointer",
+                      fontFamily: "inherit",
+                      textDecoration: "underline",
+                    }}
+                  >
+                    odhlásit se
+                  </button>
+                </>
+              )}
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -839,6 +835,14 @@ function App({ userEmail, onLogout }) {
                     <div className="text-xs truncate" style={{ color: "#6B6250" }}>
                       {p.datumNarozeni || "?"} {p.datumUmrti ? `– ${p.datumUmrti}` : ""}
                     </div>
+                    <div
+                      className="text-xs truncate"
+                      style={{ color: relCount(p.id) === 0 ? "#8B3A3A" : "#5F6F52" }}
+                    >
+                      {relCount(p.id) === 0
+                        ? "bez zaznamenaných vztahů"
+                        : `${relCount(p.id)} ${relWord(relCount(p.id))}`}
+                    </div>
                   </div>
                 </div>
               </button>
@@ -855,6 +859,7 @@ function App({ userEmail, onLogout }) {
               onCancel={() => setEditing(null)}
               onSave={saveEditing}
               isNew={!people.some((p) => p.id === editing.id)}
+              people={people}
             />
           )}
 
@@ -965,7 +970,7 @@ function App({ userEmail, onLogout }) {
                         .filter((p) => p.id !== selected.id)
                         .map((p) => (
                           <option key={p.id} value={p.id}>
-                            {personLabel(p)}
+                            {personPickerLabel(p)}
                           </option>
                         ))}
                     </select>
@@ -1043,11 +1048,56 @@ function App({ userEmail, onLogout }) {
   );
 }
 
-function PersonForm({ draft, setDraft, onCancel, onSave, isNew }) {
+function PersonForm({ draft, setDraft, onCancel, onSave, isNew, people }) {
   const set = (key) => (e) => setDraft((d) => ({ ...d, [key]: e.target.value }));
+
+  const knownPlaces = useMemo(() => {
+    const seen = new Set();
+    people.forEach((p) => {
+      [p.mistoNarozeni, p.mistoSnatku, p.mistoUmrti].forEach((v) => {
+        if (v && v.trim()) seen.add(v.trim());
+      });
+    });
+    return [...seen].sort((a, b) => a.localeCompare(b, "cs"));
+  }, [people]);
+
+  const possibleDuplicates = useMemo(() => {
+    if (!draft.jmeno && !draft.prijmeni) return [];
+    const norm = (s) => normalizePlace(s); // reuse diacritics-insensitive normalizer for names too
+    const targetName = norm(`${draft.jmeno} ${draft.prijmeni}`);
+    if (!targetName) return [];
+    return people.filter(
+      (p) => p.id !== draft.id && norm(`${p.jmeno} ${p.prijmeni}`) === targetName
+    );
+  }, [draft.id, draft.jmeno, draft.prijmeni, people]);
+
   return (
     <div>
       <h2 className="text-lg mb-4">{isNew ? "Nová osoba" : "Upravit osobu"}</h2>
+
+      {possibleDuplicates.length > 0 && (
+        <div
+          className="text-xs mb-4 p-3"
+          style={{ background: "#F3E6C6", border: "1px solid #B9AA7C", color: "#6B4E23" }}
+        >
+          Osoba se stejným jménem už možná existuje:{" "}
+          {possibleDuplicates.map((p, i) => (
+            <span key={p.id}>
+              {i > 0 && ", "}
+              {fullName(p)}
+              {p.datumNarozeni ? ` (nar. ${p.datumNarozeni})` : ""}
+            </span>
+          ))}
+          . Pokud jde o stejného člověka, zvažte úpravu existujícího záznamu místo nového.
+        </div>
+      )}
+
+      <datalist id="known-places-list">
+        {knownPlaces.map((pl) => (
+          <option key={pl} value={pl} />
+        ))}
+      </datalist>
+
       <div className="grid sm:grid-cols-2 gap-3">
         {FIELDS.map(([key, label]) => (
           <div key={key} className={key === "profese" ? "sm:col-span-2" : ""}>
@@ -1057,6 +1107,7 @@ function PersonForm({ draft, setDraft, onCancel, onSave, isNew }) {
             <input
               value={draft[key]}
               onChange={set(key)}
+              list={PLACE_FIELDS.has(key) ? "known-places-list" : undefined}
               className="w-full px-2 py-1.5 text-sm"
               style={{ border: "1px solid #C7B896", background: "#FBF7EC" }}
             />
@@ -1155,6 +1206,10 @@ function buildGedcom(people, relationships) {
     const gid = idMap.get(p.id);
     lines.push(`0 @${gid}@ INDI`);
     lines.push(`1 NAME ${p.jmeno || ""} /${p.prijmeni || ""}/`);
+    if (p.rodnePrijmeni && p.rodnePrijmeni.trim() && p.rodnePrijmeni.trim() !== (p.prijmeni || "").trim()) {
+      lines.push(`1 NAME ${p.jmeno || ""} /${p.rodnePrijmeni.trim()}/`);
+      lines.push("2 TYPE maiden");
+    }
     lines.push("1 SEX U");
     if (p.datumNarozeni || p.mistoNarozeni) {
       lines.push("1 BIRT");
@@ -1213,7 +1268,7 @@ function PrintTree({ people, relationships, onBack }) {
     const years = `${p.datumNarozeni || "?"}${p.datumUmrti ? " – " + p.datumUmrti : ""}`;
     return (
       <div className="pt-person">
-        <div className="pt-name">{`${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)"}</div>
+        <div className="pt-name">{fullName(p)}</div>
         {(p.datumNarozeni || p.datumUmrti) && <div className="pt-years">{years}</div>}
         {p.profese && <div className="pt-years">{p.profese}</div>}
       </div>
@@ -1411,7 +1466,7 @@ function MapView({ people, onBack }) {
   const events = useMemo(() => {
     const list = [];
     people.forEach((p) => {
-      const name = `${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)";
+      const name = fullName(p);
       if (p.mistoNarozeni)
         list.push({ place: p.mistoNarozeni.trim(), type: "narození", date: p.datumNarozeni, name });
       if (p.mistoSnatku)
@@ -1639,6 +1694,12 @@ function SuggestionsView({ people, relationships, setRelationships, onBack }) {
       (r) => r.personId === personId && r.targetId === targetId && r.type === type
     );
     if (already) return;
+    if (type === "dite" && isDescendantOf(personId, targetId, relationships)) {
+      alert(
+        "Tenhle vztah nejde přidat — podle už zadaných vztahů by tak byla osoba sama sobě předkem (vznikl by kruh)."
+      );
+      return;
+    }
     setRelationships((prev) => [...prev, ...makeRelationshipPair(personId, targetId, type)]);
   }
 
@@ -1646,7 +1707,7 @@ function SuggestionsView({ people, relationships, setRelationships, onBack }) {
     setDismissed((prev) => new Set(prev).add(keyOf(s)));
   }
 
-  const nameOf = (p) => `${p.jmeno} ${p.prijmeni}`.trim() || "(bez jména)";
+  const nameOf = (p) => fullName(p);
   const typeLabel = { partner: "manžel/manželka", sourozenec: "sourozenec", "parent-child": "rodič – dítě" };
   const confLabel = { 3: "vysoká shoda", 2: "střední shoda", 1: "nízká shoda" };
   const confColor = { 3: "#5F6F52", 2: "#8B6F3A", 1: "#9C8F73" };
